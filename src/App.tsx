@@ -35,11 +35,23 @@ import {
   AlertCircle,
   BarChart3,
   PieChart as PieChartIcon,
-  TrendingUp
+  TrendingUp,
+  Cloud,
+  CheckCheck
 } from 'lucide-react';
 import { SARLogo } from './components/SARLogo';
 import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import { INITIAL_CORRESPONDENCE } from './data/mockData';
+import { db } from './firebase';
+import {
+  collection,
+  onSnapshot,
+  doc,
+  getDoc,
+  setDoc,
+  deleteDoc,
+  writeBatch
+} from 'firebase/firestore';
 
 export type NetworkType = 'SAR' | 'HHR' | 'MMMP';
 export type DirectionType = 'IN' | 'OUT';
@@ -92,6 +104,8 @@ export default function App() {
     return localStorage.getItem(PASS_KEY) || '';
   });
   const [isLocked, setIsLocked] = useState<boolean>(true);
+  const [isCloudSyncing, setIsCloudSyncing] = useState<boolean>(true);
+  const [lastSyncTime, setLastSyncTime] = useState<string>('متزامن الآن');
 
   // Filters matching exact selects
   const [searchQuery, setSearchQuery] = useState('');
@@ -112,6 +126,95 @@ export default function App() {
 
   // Last updated string exactly matching screenshot format
   const [lastUpdated, setLastUpdated] = useState('02 Sept 2026 10:59');
+
+  // 1. Realtime Firestore Listener & Safe One-Time Initialization
+  useEffect(() => {
+    const checkAndInit = async () => {
+      try {
+        const metaRef = doc(db, 'system_meta', 'init');
+        const metaSnap = await getDoc(metaRef);
+        if (!metaSnap.exists()) {
+          const batch = writeBatch(db);
+          INITIAL_CORRESPONDENCE.forEach((c, idx) => {
+            const docRef = doc(db, 'letters', `letter-init-${idx + 1}`);
+            batch.set(docRef, {
+              refNumber: c.refNumber,
+              date: c.date,
+              network: c.network,
+              direction: c.direction,
+              subject: c.subject,
+              status: c.status === 'PENDING_REPLY' ? 'OPEN' : c.status,
+              requiresReply: c.requiresReply,
+              replyDeadline: c.replyDeadline || '',
+              notes: c.notes || '',
+              sender: c.sender || '',
+              recipient: c.recipient || '',
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            });
+          });
+          batch.set(metaRef, {
+            initialized: true,
+            createdAt: new Date().toISOString(),
+          });
+          await batch.commit();
+        }
+      } catch (err) {
+        console.error('Initialization check error:', err);
+      }
+    };
+
+    checkAndInit();
+
+    const lettersCol = collection(db, 'letters');
+    const unsubscribe = onSnapshot(
+      lettersCol,
+      (snapshot) => {
+        setIsCloudSyncing(false);
+        const now = new Date();
+        setLastSyncTime(now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+
+        if (!snapshot.empty) {
+          const cloudLetters: LetterItem[] = snapshot.docs.map((docSnap) => {
+            const data = docSnap.data();
+            return {
+              id: docSnap.id,
+              refNumber: data.refNumber || docSnap.id,
+              date: data.date || '',
+              network: data.network || 'SAR',
+              direction: data.direction || 'IN',
+              subject: data.subject || '',
+              status: data.status || 'OPEN',
+              requiresReply: !!data.requiresReply,
+              replyDeadline: data.replyDeadline || '',
+              notes: data.notes || '',
+              sender: data.sender || '',
+              recipient: data.recipient || '',
+            };
+          });
+
+          // Sort by date or id descending
+          cloudLetters.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+          setItems(cloudLetters);
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(cloudLetters));
+          } catch {}
+        } else {
+          // Empty state: user cleared all records. Do NOT resurrect!
+          setItems([]);
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify([]));
+          } catch {}
+        }
+      },
+      (error) => {
+        console.error('Firestore real-time sync error:', error);
+        setIsCloudSyncing(false);
+      }
+    );
+
+    return () => unsubscribe();
+  }, []);
 
   useEffect(() => {
     try {
@@ -166,41 +269,88 @@ export default function App() {
     action();
   };
 
-  const handleSaveLetter = (data: Partial<LetterItem>) => {
+  const handleSaveLetter = async (data: Partial<LetterItem>) => {
     if (isLocked) {
       setIsPasswordModalOpen(true);
       return;
     }
-    if (data.id) {
-      setItems(prev => prev.map(it => it.id === data.id ? { ...it, ...data } as LetterItem : it));
-    } else {
-      const newItem: LetterItem = {
-        id: 'letter-' + Date.now(),
-        refNumber: data.refNumber || `SAR-CR-2026-${Math.floor(1000 + Math.random() * 9000)}`,
-        date: data.date || new Date().toISOString().split('T')[0],
-        network: data.network || 'SAR',
-        direction: data.direction || 'IN',
-        subject: data.subject || '',
-        status: data.status || 'OPEN',
-        requiresReply: !!data.requiresReply,
-        replyDeadline: data.replyDeadline,
-        notes: data.notes || '',
-        sender: data.sender || '',
-        recipient: data.recipient || '',
-      };
-      setItems(prev => [newItem, ...prev]);
+    try {
+      if (data.id) {
+        const docRef = doc(db, 'letters', data.id);
+        await setDoc(
+          docRef,
+          {
+            ...data,
+            updatedAt: new Date().toISOString(),
+          },
+          { merge: true }
+        );
+      } else {
+        const newId = 'letter-' + Date.now();
+        const docRef = doc(db, 'letters', newId);
+        const newItem = {
+          refNumber: data.refNumber || `SAR-CR-2026-${Math.floor(1000 + Math.random() * 9000)}`,
+          date: data.date || new Date().toISOString().split('T')[0],
+          network: data.network || 'SAR',
+          direction: data.direction || 'IN',
+          subject: data.subject || '',
+          status: data.status || 'OPEN',
+          requiresReply: !!data.requiresReply,
+          replyDeadline: data.replyDeadline || '',
+          notes: data.notes || '',
+          sender: data.sender || '',
+          recipient: data.recipient || '',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        await setDoc(docRef, newItem);
+      }
+    } catch (err) {
+      console.error('Error saving letter to Firestore:', err);
     }
     setEditingItem(null);
     setIsAddModalOpen(false);
   };
 
-  const handleDeleteLetter = (id: string) => {
+  const handleDeleteLetter = async (id: string) => {
     if (isLocked) {
       setIsPasswordModalOpen(true);
       return;
     }
     if (window.confirm('هل أنت متأكد من حذف هذا السجل؟')) {
-      setItems(prev => prev.filter(it => it.id !== id));
+      try {
+        await deleteDoc(doc(db, 'letters', id));
+      } catch (err) {
+        console.error('Error deleting letter from Firestore:', err);
+      }
+    }
+  };
+
+  const handleBulkImport = async (newLetters: LetterItem[]) => {
+    try {
+      const batch = writeBatch(db);
+      newLetters.forEach((item, idx) => {
+        const id = item.id || `letter-imp-${Date.now()}-${idx}`;
+        const docRef = doc(db, 'letters', id);
+        batch.set(docRef, {
+          refNumber: item.refNumber,
+          date: item.date,
+          network: item.network,
+          direction: item.direction,
+          subject: item.subject,
+          status: item.status || 'OPEN',
+          requiresReply: !!item.requiresReply,
+          replyDeadline: item.replyDeadline || '',
+          notes: item.notes || '',
+          sender: item.sender || '',
+          recipient: item.recipient || '',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+      });
+      await batch.commit();
+    } catch (err) {
+      console.error('Error bulk importing to Firestore:', err);
     }
   };
 
@@ -231,17 +381,19 @@ export default function App() {
             <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
               
               {/* Right side: SAR Logo Box & Titles */}
-              <div className="flex items-center gap-6">
+              <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 sm:gap-6 w-full lg:w-auto">
                 {/* SAR Official Logo Box */}
-                <SARLogo />
+                <div className="shrink-0">
+                  <SARLogo />
+                </div>
 
                 {/* Title, Badges & Subtitle */}
-                <div>
+                <div className="flex-1">
                   <div className="flex items-center gap-2 flex-wrap mb-2">
-                    <span className="px-3.5 py-1 rounded-full text-[11px] font-bold tracking-wider uppercase bg-[#00707b] text-white">
+                    <span className="px-3 py-0.5 rounded-full text-[10px] sm:text-[11px] font-bold tracking-wider uppercase bg-[#00707b] text-white whitespace-nowrap">
                       CORRESPONDENCE REGISTER
                     </span>
-                    <span className="px-3 py-1 rounded-full text-[11px] font-semibold text-slate-600 bg-white border border-slate-200">
+                    <span className="px-2.5 py-0.5 rounded-full text-[10px] sm:text-[11px] font-semibold text-slate-600 bg-white border border-slate-200 whitespace-nowrap">
                       SAR · HHR · MMMP
                     </span>
                   </div>
@@ -251,7 +403,7 @@ export default function App() {
                     <button
                       id="header-security-pill"
                       onClick={() => setIsPasswordModalOpen(true)}
-                      className="mb-2 px-3 py-1 rounded-full text-[11px] font-bold text-[#b91c1c] bg-[#fee2e2] border border-[#fca5a5] hover:bg-rose-100 transition-colors flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                      className="mb-2 px-3 py-1 rounded-full text-[11px] font-bold text-[#b91c1c] bg-[#fee2e2] border border-[#fca5a5] hover:bg-rose-100 transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-2xs"
                     >
                       <span className="text-xs">🛡️</span>
                       <span>(Set Password) إنشاء كلمة مرور الحماية</span>
@@ -260,14 +412,14 @@ export default function App() {
                     <button
                       id="header-security-pill"
                       onClick={() => setIsPasswordModalOpen(true)}
-                      className="mb-2 px-3.5 py-1 rounded-full text-[11px] font-bold text-amber-900 bg-amber-100 border border-amber-300 hover:bg-amber-200 transition-colors flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                      className="mb-2 px-3.5 py-1 rounded-full text-[11px] font-bold text-amber-900 bg-amber-100 border border-amber-300 hover:bg-amber-200 transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-2xs"
                     >
                       <Lock className="w-3.5 h-3.5 text-amber-700" />
                       <span>(Admin Login) تسجيل دخول للتعديل</span>
                     </button>
                   ) : (
-                    <div className="mb-2 flex items-center gap-2">
-                      <span className="px-3 py-1 rounded-full text-[11px] font-bold text-emerald-800 bg-emerald-100 border border-emerald-300 flex items-center gap-1.5">
+                    <div className="mb-2 flex items-center gap-2 flex-wrap">
+                      <span className="px-3 py-1 rounded-full text-[11px] font-bold text-emerald-800 bg-emerald-100 border border-emerald-300 inline-flex items-center gap-1.5">
                         <Unlock className="w-3.5 h-3.5 text-emerald-700" />
                         <span>وضع التعديل مفعل (Admin Unlocked)</span>
                       </span>
@@ -281,10 +433,8 @@ export default function App() {
                     </div>
                   )}
 
-                  <h1 className="text-2xl sm:text-3xl font-black text-[#1e293b] tracking-tight leading-snug">
-                    سجل المراسلات والخطابات
-                    <br />
-                    الرسمية
+                  <h1 className="text-xl sm:text-2xl lg:text-3xl font-black text-[#1e293b] tracking-tight leading-snug">
+                    سجل المراسلات والخطابات الرسمية
                   </h1>
                   <p className="text-xs sm:text-sm text-slate-500 font-medium mt-1 max-w-xl leading-relaxed">
                     Official Centralized Tracking for In-Coming &amp; Out-Going Letters
@@ -293,25 +443,25 @@ export default function App() {
               </div>
 
               {/* Left side: Action Buttons matching exact layout */}
-              <div className="flex flex-col items-end gap-3 w-full lg:w-auto">
+              <div className="flex flex-col items-stretch sm:items-end gap-2.5 w-full lg:w-auto">
                 {/* Row 1 */}
-                <div className="flex items-center gap-2 flex-wrap justify-end">
+                <div className="flex items-center gap-2 flex-wrap justify-start sm:justify-end">
                   <button
                     id="btn-analytics"
                     onClick={() => setIsAnalyticsOpen(true)}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-[#00707b]/10 hover:bg-[#00707b]/20 text-[#00707b] border border-[#00707b]/30 rounded-full text-xs sm:text-sm font-bold transition-all cursor-pointer shadow-2xs"
+                    className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 px-3.5 py-1.5 bg-[#00707b]/10 hover:bg-[#00707b]/20 text-[#00707b] border border-[#00707b]/30 rounded-full text-xs sm:text-sm font-bold transition-all cursor-pointer shadow-2xs whitespace-nowrap"
                   >
                     <BarChart3 className="w-3.5 h-3.5 text-[#00707b]" />
-                    <span>(Analytics) إحصائيات ورسوم بيانية</span>
+                    <span>(Analytics) إحصائيات ورسوم</span>
                   </button>
 
                   <button
                     id="btn-share"
                     onClick={() => setIsShareModalOpen(true)}
-                    className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-white hover:bg-slate-50 text-[#00707b] border border-[#00707b] rounded-full text-xs sm:text-sm font-bold transition-colors cursor-pointer shadow-2xs"
+                    className="inline-flex items-center justify-center gap-1.5 px-3.5 py-1.5 bg-white hover:bg-slate-50 text-[#00707b] border border-[#00707b] rounded-full text-xs sm:text-sm font-bold transition-colors cursor-pointer shadow-2xs whitespace-nowrap"
                   >
                     <Share2 className="w-3.5 h-3.5" />
-                    <span>(Share) مشاركة الرابط</span>
+                    <span>(Share) مشاركة</span>
                   </button>
 
                   <button
@@ -320,19 +470,21 @@ export default function App() {
                       const now = new Date();
                       setLastUpdated(now.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) + ' ' + now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
                     }}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-white hover:bg-slate-50 text-slate-600 border border-slate-300 rounded-full text-xs sm:text-sm font-medium transition-colors cursor-pointer shadow-2xs"
+                    className="inline-flex items-center justify-center gap-1.5 px-3.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-full text-xs sm:text-sm font-bold transition-colors cursor-pointer shadow-2xs"
+                    title="مزامنة حية متصلة مع قاعدة البيانات السحابية"
                   >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    <span>Sync</span>
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                    <Cloud className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>سحابي مباشر ({lastSyncTime})</span>
                   </button>
                 </div>
 
                 {/* Row 2 */}
-                <div className="flex items-center gap-2 flex-wrap justify-end">
+                <div className="flex items-center gap-2 flex-wrap justify-start sm:justify-end">
                   <button
                     id="btn-import-excel"
                     onClick={() => handleRequireAuth(() => setIsExcelModalOpen(true))}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 bg-white hover:bg-slate-50 text-[#00707b] border border-[#00707b] rounded-xl text-xs sm:text-sm font-bold transition-colors cursor-pointer shadow-2xs"
+                    className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 px-4 py-2 bg-white hover:bg-slate-50 text-[#00707b] border border-[#00707b] rounded-xl text-xs sm:text-sm font-bold transition-colors cursor-pointer shadow-2xs whitespace-nowrap"
                   >
                     <FileSpreadsheet className="w-4 h-4 text-[#00707b]" />
                     <span>(Excel) استيراد إكسل</span>
@@ -344,7 +496,7 @@ export default function App() {
                       setEditingItem(null);
                       setIsAddModalOpen(true);
                     })}
-                    className="inline-flex items-center gap-1.5 px-5 py-2 bg-[#00707b] hover:bg-[#005f69] text-white rounded-xl text-xs sm:text-sm font-bold transition-all shadow-sm cursor-pointer"
+                    className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 px-5 py-2 bg-[#00707b] hover:bg-[#005f69] text-white rounded-xl text-xs sm:text-sm font-bold transition-all shadow-sm cursor-pointer whitespace-nowrap"
                   >
                     <Plus className="w-4 h-4" />
                     <span>(Log Letter) إضافة خطاب</span>
@@ -658,8 +810,111 @@ export default function App() {
           </div>
         </div>
 
-        {/* Correspondence Table with Exact Headers from Screenshot */}
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+        {/* Mobile-Optimized List View (Visible on small screens) */}
+        <div className="block md:hidden space-y-3 mb-6">
+          {filteredItems.length === 0 ? null : (
+            filteredItems.map((item, idx) => (
+              <div
+                key={item.id}
+                className="bg-white rounded-2xl border border-slate-200 p-4 shadow-2xs space-y-3 transition-all hover:border-[#00707b]/40"
+              >
+                <div className="flex items-center justify-between gap-2 border-b border-slate-100 pb-2.5">
+                  <div className="flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full bg-slate-100 text-slate-600 flex items-center justify-center font-mono text-xs font-bold">
+                      {idx + 1}
+                    </span>
+                    <button
+                      onClick={() => setViewingItem(item)}
+                      className="font-mono font-black text-slate-900 text-left text-sm hover:text-[#00707b]"
+                      dir="ltr"
+                    >
+                      {item.refNumber}
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-teal-50 text-[#00707b] border border-teal-200 font-mono">
+                      {item.network}
+                    </span>
+                    {item.direction === 'IN' ? (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-sky-50 text-sky-700 border border-sky-200">
+                        وارد
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                        صادر
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <h4
+                    onClick={() => setViewingItem(item)}
+                    className="font-bold text-slate-900 text-sm leading-snug cursor-pointer hover:text-[#00707b]"
+                  >
+                    {item.subject}
+                  </h4>
+                  {(item.sender || item.recipient) && (
+                    <p className="text-xs text-slate-500 mt-1">
+                      {item.sender ? `من: ${item.sender}` : ''} {item.recipient ? `➔ إلى: ${item.recipient}` : ''}
+                    </p>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-100 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-400 font-mono text-[11px]">{item.date}</span>
+                    {item.status === 'OPEN' && (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
+                        مفتوح
+                      </span>
+                    )}
+                    {item.status === 'CLOSED' && (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                        مغلق
+                      </span>
+                    )}
+                    {item.status === 'UNDER_REVIEW' && (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-200">
+                        تحت المراجعة
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={() => setViewingItem(item)}
+                      className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 cursor-pointer"
+                      title="معاينة"
+                    >
+                      <Eye className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => handleRequireAuth(() => {
+                        setEditingItem(item);
+                        setIsAddModalOpen(true);
+                      })}
+                      className="p-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 cursor-pointer"
+                      title="تعديل"
+                    >
+                      <Edit className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => handleDeleteLetter(item.id)}
+                      className="p-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 cursor-pointer"
+                      title="حذف"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+
+        {/* Correspondence Table with Exact Headers from Screenshot (Desktop & Tablets) */}
+        <div className="hidden md:block bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-right text-xs sm:text-sm">
               <thead>
@@ -797,7 +1052,7 @@ export default function App() {
                       <td className="py-3.5 px-4 text-xs text-slate-600">
                         <div className="flex items-center justify-between gap-2">
                           <span>{item.notes || '—'}</span>
-                          <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
+                          <div className="opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity flex items-center gap-1">
                             <button
                               onClick={() => setViewingItem(item)}
                               className="p-1 rounded hover:bg-slate-200 text-slate-500 cursor-pointer"
@@ -885,7 +1140,7 @@ export default function App() {
         <ExcelImportModal
           isOpen={isExcelModalOpen}
           onClose={() => setIsExcelModalOpen(false)}
-          onImport={(imported) => setItems(prev => [...imported, ...prev])}
+          onImport={handleBulkImport}
         />
       )}
 

@@ -1,0 +1,72 @@
+{
+  "entities": {
+    "letters": {
+      "title": "Letters",
+      "description": "SAR Centralized Correspondence and Official Letters",
+      "type": "object",
+      "properties": {
+        "refNumber": {
+          "type": "string",
+          "description": "Official letter reference number"
+        },
+        "date": {
+          "type": "string",
+          "description": "Date of letter (YYYY-MM-DD)"
+        },
+        "network": {
+          "type": "string",
+          "description": "Network: SAR, HHR, or MMMP"
+        },
+        "direction": {
+          "type": "string",
+          "description": "Direction: IN (Incoming) or OUT (Outgoing)"
+        },
+        "category": {
+          "type": "string",
+          "description": "Category: LETTER, MOM, CIRCULAR"
+        },
+        "sender": {
+          "type": "string",
+          "description": "Sender organization or person"
+        },
+        "recipient": {
+          "type": "string",
+          "description": "Recipient organization or person"
+        },
+        "subject": {
+          "type": "string",
+          "description": "Subject or topic of correspondence"
+        },
+        "status": {
+          "type": "string",
+          "description": "Status: OPEN, CLOSED, UNDER_REVIEW, PENDING_REPLY"
+        },
+        "requiresReply": {
+          "type": "boolean",
+          "description": "Whether a response/reply is required"
+        },
+        "replyDeadline": {
+          "type": "string",
+          "description": "Deadline for reply if required"
+        },
+        "replyReference": {
+          "type": "string",
+          "description": "Reference number of the reply letter"
+        },
+        "notes": {
+          "type": "string",
+          "description": "Operational notes or comments"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last updated timestamp"
+        }
+      },
+      "required": ["refNumber", "date", "network", "direction", "subject", "status"]
+    }
+  }
+}
