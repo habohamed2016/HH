@@ -1,0 +1,6 @@
+{
+  "name": "سجل المراسلات والخطابات الرسمية - SAR",
+  "description": "نظام تتبع وإدارة المراسلات والخطابات الرسمية للخطوط الحديدية السعودية (SAR · HHR · MMMP)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
