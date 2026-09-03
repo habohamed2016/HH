@@ -103,7 +103,9 @@ export default function App() {
   const [password, setPassword] = useState<string>(() => {
     return localStorage.getItem(PASS_KEY) || '';
   });
-  const [isLocked, setIsLocked] = useState<boolean>(true);
+  const [isLocked, setIsLocked] = useState<boolean>(() => {
+    return !!localStorage.getItem(PASS_KEY);
+  });
   const [isCloudSyncing, setIsCloudSyncing] = useState<boolean>(true);
   const [lastSyncTime, setLastSyncTime] = useState<string>('متزامن الآن');
 
@@ -262,7 +264,7 @@ export default function App() {
   }, [items, selectedMetric, networkFilter, directionFilter, statusFilter, replyFilter, searchQuery]);
 
   const handleRequireAuth = (action: () => void) => {
-    if (isLocked) {
+    if (isLocked && password) {
       setIsPasswordModalOpen(true);
       return;
     }
@@ -270,25 +272,39 @@ export default function App() {
   };
 
   const handleSaveLetter = async (data: Partial<LetterItem>) => {
-    if (isLocked) {
+    if (isLocked && password) {
       setIsPasswordModalOpen(true);
       return;
     }
     try {
       if (data.id) {
         const docRef = doc(db, 'letters', data.id);
-        await setDoc(
-          docRef,
-          {
-            ...data,
-            updatedAt: new Date().toISOString(),
-          },
-          { merge: true }
-        );
+        const updatePayload: Record<string, any> = {
+          refNumber: data.refNumber || '',
+          date: data.date || '',
+          network: data.network || 'SAR',
+          direction: data.direction || 'IN',
+          subject: data.subject || '',
+          status: data.status || 'OPEN',
+          requiresReply: !!data.requiresReply,
+          replyDeadline: data.replyDeadline || '',
+          notes: data.notes || '',
+          sender: data.sender || '',
+          recipient: data.recipient || '',
+          updatedAt: new Date().toISOString(),
+        };
+        await setDoc(docRef, updatePayload, { merge: true });
+
+        // Update local React state immediately
+        setItems(prev => prev.map(item => item.id === data.id ? { ...item, ...data } as LetterItem : item));
+        if (viewingItem && viewingItem.id === data.id) {
+          setViewingItem(prev => prev ? { ...prev, ...data } as LetterItem : null);
+        }
       } else {
         const newId = 'letter-' + Date.now();
         const docRef = doc(db, 'letters', newId);
-        const newItem = {
+        const newItem: LetterItem = {
+          id: newId,
           refNumber: data.refNumber || `SAR-CR-2026-${Math.floor(1000 + Math.random() * 9000)}`,
           date: data.date || new Date().toISOString().split('T')[0],
           network: data.network || 'SAR',
@@ -300,28 +316,40 @@ export default function App() {
           notes: data.notes || '',
           sender: data.sender || '',
           recipient: data.recipient || '',
+        };
+        await setDoc(docRef, {
+          ...newItem,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
-        };
-        await setDoc(docRef, newItem);
+        });
+        setItems(prev => [newItem, ...prev]);
       }
     } catch (err) {
       console.error('Error saving letter to Firestore:', err);
+      // Fallback: update local items
+      if (data.id) {
+        setItems(prev => prev.map(item => item.id === data.id ? { ...item, ...data } as LetterItem : item));
+      }
     }
     setEditingItem(null);
     setIsAddModalOpen(false);
   };
 
   const handleDeleteLetter = async (id: string) => {
-    if (isLocked) {
+    if (isLocked && password) {
       setIsPasswordModalOpen(true);
       return;
     }
     if (window.confirm('هل أنت متأكد من حذف هذا السجل؟')) {
       try {
         await deleteDoc(doc(db, 'letters', id));
+        setItems(prev => prev.filter(item => item.id !== id));
+        if (viewingItem && viewingItem.id === id) {
+          setViewingItem(null);
+        }
       } catch (err) {
         console.error('Error deleting letter from Firestore:', err);
+        setItems(prev => prev.filter(item => item.id !== id));
       }
     }
   };
@@ -1149,6 +1177,16 @@ export default function App() {
         <ItemDetailsModal
           item={viewingItem}
           onClose={() => setViewingItem(null)}
+          onEdit={(item) => {
+            setViewingItem(null);
+            handleRequireAuth(() => {
+              setEditingItem(item);
+              setIsAddModalOpen(true);
+            });
+          }}
+          onDelete={(id) => {
+            handleDeleteLetter(id);
+          }}
         />
       )}
 
@@ -1176,17 +1214,48 @@ function LetterFormModal({
   onSave: (data: Partial<LetterItem>) => void;
   initialData: LetterItem | null;
 }) {
-  const [refNumber, setRefNumber] = useState(initialData?.refNumber || `SAR-CR-2026-${Math.floor(1000 + Math.random() * 9000)}`);
-  const [date, setDate] = useState(initialData?.date || new Date().toISOString().split('T')[0]);
-  const [network, setNetwork] = useState<NetworkType>(initialData?.network || 'SAR');
-  const [direction, setDirection] = useState<DirectionType>(initialData?.direction || 'IN');
-  const [subject, setSubject] = useState(initialData?.subject || '');
-  const [sender, setSender] = useState(initialData?.sender || '');
-  const [recipient, setRecipient] = useState(initialData?.recipient || '');
-  const [status, setStatus] = useState<StatusType>(initialData?.status || 'OPEN');
-  const [requiresReply, setRequiresReply] = useState(initialData?.requiresReply || false);
-  const [replyDeadline, setReplyDeadline] = useState(initialData?.replyDeadline || '');
-  const [notes, setNotes] = useState(initialData?.notes || '');
+  const [refNumber, setRefNumber] = useState('');
+  const [date, setDate] = useState('');
+  const [network, setNetwork] = useState<NetworkType>('SAR');
+  const [direction, setDirection] = useState<DirectionType>('IN');
+  const [subject, setSubject] = useState('');
+  const [sender, setSender] = useState('');
+  const [recipient, setRecipient] = useState('');
+  const [status, setStatus] = useState<StatusType>('OPEN');
+  const [requiresReply, setRequiresReply] = useState(false);
+  const [replyDeadline, setReplyDeadline] = useState('');
+  const [notes, setNotes] = useState('');
+
+  // Sync state whenever modal opens or initialData changes
+  useEffect(() => {
+    if (isOpen) {
+      if (initialData) {
+        setRefNumber(initialData.refNumber || '');
+        setDate(initialData.date || new Date().toISOString().split('T')[0]);
+        setNetwork(initialData.network || 'SAR');
+        setDirection(initialData.direction || 'IN');
+        setSubject(initialData.subject || '');
+        setSender(initialData.sender || '');
+        setRecipient(initialData.recipient || '');
+        setStatus(initialData.status || 'OPEN');
+        setRequiresReply(!!initialData.requiresReply);
+        setReplyDeadline(initialData.replyDeadline || '');
+        setNotes(initialData.notes || '');
+      } else {
+        setRefNumber(`SAR-CR-2026-${Math.floor(1000 + Math.random() * 9000)}`);
+        setDate(new Date().toISOString().split('T')[0]);
+        setNetwork('SAR');
+        setDirection('IN');
+        setSubject('');
+        setSender('');
+        setRecipient('');
+        setStatus('OPEN');
+        setRequiresReply(false);
+        setReplyDeadline('');
+        setNotes('');
+      }
+    }
+  }, [isOpen, initialData]);
 
   if (!isOpen) return null;
 
@@ -1194,8 +1263,18 @@ function LetterFormModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
       <div className="bg-white rounded-3xl max-w-xl w-full max-h-[90vh] overflow-y-auto shadow-2xl border border-slate-200">
         <div className="bg-slate-50 border-b border-slate-200 px-6 py-4 flex items-center justify-between">
-          <h2 className="text-base font-bold text-slate-900">
-            {initialData ? 'تعديل بيانات الخطاب' : 'إضافة وتسجيل خطاب جديد'}
+          <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
+            {initialData ? (
+              <>
+                <Edit className="w-4 h-4 text-[#00707b]" />
+                <span>تعديل بيانات الخطاب ({initialData.refNumber})</span>
+              </>
+            ) : (
+              <>
+                <Plus className="w-4 h-4 text-[#00707b]" />
+                <span>إضافة وتسجيل خطاب جديد</span>
+              </>
+            )}
           </h2>
           <button onClick={onClose} className="p-1 rounded-lg text-slate-400 hover:text-slate-700">
             <X className="w-5 h-5" />
@@ -1215,7 +1294,7 @@ function LetterFormModal({
             recipient,
             status,
             requiresReply,
-            replyDeadline: requiresReply ? replyDeadline : undefined,
+            replyDeadline: requiresReply ? replyDeadline : '',
             notes,
           });
         }} className="p-6 space-y-4">
@@ -1344,15 +1423,15 @@ function LetterFormModal({
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 bg-slate-100 text-slate-700 rounded-xl text-xs font-bold"
+              className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold cursor-pointer"
             >
               إلغاء
             </button>
             <button
               type="submit"
-              className="px-6 py-2 bg-[#006d77] hover:bg-[#005a63] text-white rounded-xl text-xs font-bold"
+              className="px-6 py-2 bg-[#006d77] hover:bg-[#005a63] text-white rounded-xl text-xs font-bold transition-colors cursor-pointer shadow-sm"
             >
-              حفظ الخطاب
+              {initialData ? 'حفظ التعديلات' : 'حفظ وتسجيل الخطاب'}
             </button>
           </div>
         </form>
@@ -1635,38 +1714,112 @@ function ExcelImportModal({ isOpen, onClose, onImport }: { isOpen: boolean; onCl
   );
 }
 
-function ItemDetailsModal({ item, onClose }: { item: LetterItem; onClose: () => void }) {
+function ItemDetailsModal({
+  item,
+  onClose,
+  onEdit,
+  onDelete,
+}: {
+  item: LetterItem;
+  onClose: () => void;
+  onEdit: (item: LetterItem) => void;
+  onDelete: (id: string) => void;
+}) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
       <div className="bg-white rounded-3xl max-w-lg w-full p-6 space-y-4 border border-slate-200 shadow-2xl">
-        <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+        <div className="flex items-center justify-between border-b border-slate-100 pb-3">
           <div className="flex items-center gap-2">
-            <span className="font-mono font-bold text-slate-900 text-sm" dir="ltr">{item.refNumber}</span>
-            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-teal-100 text-teal-800 font-mono">{item.network}</span>
+            <span className="font-mono font-bold text-slate-900 text-base" dir="ltr">{item.refNumber}</span>
+            <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-teal-100 text-teal-800 font-mono">{item.network}</span>
+            <span className={`px-2 py-0.5 rounded text-[11px] font-bold ${
+              item.status === 'OPEN' ? 'bg-rose-50 text-rose-700 border border-rose-200' :
+              item.status === 'CLOSED' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
+              'bg-amber-50 text-amber-800 border border-amber-200'
+            }`}>
+              {item.status === 'OPEN' ? 'مفتوح' : item.status === 'CLOSED' ? 'مغلق' : 'تحت المراجعة'}
+            </span>
           </div>
-          <button onClick={onClose}><X className="w-5 h-5 text-slate-400" /></button>
+          <button onClick={onClose} className="p-1 rounded-lg text-slate-400 hover:text-slate-700">
+            <X className="w-5 h-5" />
+          </button>
         </div>
+
         <div className="space-y-3 text-xs">
-          <div className="bg-slate-50 p-3 rounded-xl">
-            <span className="text-slate-400 block mb-1">الموضوع:</span>
-            <p className="font-bold text-slate-900 text-sm">{item.subject}</p>
+          <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-100">
+            <span className="text-slate-400 font-bold block mb-1">موضوع الخطاب:</span>
+            <p className="font-bold text-slate-900 text-sm leading-relaxed">{item.subject}</p>
           </div>
-          <div className="grid grid-cols-2 gap-2">
-            <div className="bg-slate-50 p-2.5 rounded-xl">
-              <span className="text-slate-400 block">التاريخ:</span>
+
+          <div className="grid grid-cols-2 gap-2.5">
+            <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
+              <span className="text-slate-400 font-bold block mb-0.5">التاريخ:</span>
               <span className="font-bold text-slate-800 font-mono">{item.date}</span>
             </div>
-            <div className="bg-slate-50 p-2.5 rounded-xl">
-              <span className="text-slate-400 block">النوع:</span>
-              <span className="font-bold text-slate-800">{item.direction === 'IN' ? 'وارد (In)' : 'صادر (Out)'}</span>
+            <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
+              <span className="text-slate-400 font-bold block mb-0.5">نوع الخطاب:</span>
+              <span className="font-bold text-slate-800">{item.direction === 'IN' ? 'وارد (In-Coming)' : 'صادر (Out-Going)'}</span>
             </div>
           </div>
-          {item.notes && (
-            <div className="bg-slate-50 p-3 rounded-xl">
-              <span className="text-slate-400 block mb-1">الملاحظات:</span>
-              <p className="text-slate-700">{item.notes}</p>
+
+          {(item.sender || item.recipient) && (
+            <div className="grid grid-cols-2 gap-2.5">
+              <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
+                <span className="text-slate-400 font-bold block mb-0.5">الجهة المرسلة:</span>
+                <span className="font-bold text-slate-800">{item.sender || '—'}</span>
+              </div>
+              <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
+                <span className="text-slate-400 font-bold block mb-0.5">الجهة المستلمة:</span>
+                <span className="font-bold text-slate-800">{item.recipient || '—'}</span>
+              </div>
             </div>
           )}
+
+          <div className="grid grid-cols-2 gap-2.5">
+            <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
+              <span className="text-slate-400 font-bold block mb-0.5">مطلوب رد رسمي:</span>
+              <span className={`font-bold ${item.requiresReply ? 'text-amber-700' : 'text-slate-600'}`}>
+                {item.requiresReply ? 'نعم (مطلوب رد)' : 'لا'}
+              </span>
+            </div>
+            <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
+              <span className="text-slate-400 font-bold block mb-0.5">مهلة الرد:</span>
+              <span className="font-bold text-slate-800 font-mono">{item.replyDeadline || '—'}</span>
+            </div>
+          </div>
+
+          {item.notes && (
+            <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-100">
+              <span className="text-slate-400 font-bold block mb-1">الملاحظات والتفاصيل:</span>
+              <p className="text-slate-700 leading-relaxed whitespace-pre-wrap">{item.notes}</p>
+            </div>
+          )}
+        </div>
+
+        <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
+          <button
+            onClick={() => onDelete(item.id)}
+            className="inline-flex items-center gap-1.5 px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold transition-colors cursor-pointer"
+          >
+            <Trash2 className="w-4 h-4" />
+            <span>حذف الخطاب</span>
+          </button>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onClose}
+              className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold cursor-pointer"
+            >
+              إغلاق
+            </button>
+            <button
+              onClick={() => onEdit(item)}
+              className="inline-flex items-center gap-1.5 px-5 py-2 bg-[#00707b] hover:bg-[#005f69] text-white rounded-xl text-xs font-bold transition-colors cursor-pointer shadow-sm"
+            >
+              <Edit className="w-4 h-4" />
+              <span>تعديل هذا الخطاب</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>
