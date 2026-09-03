@@ -39,8 +39,11 @@ import {
   Cloud,
   CheckCheck
 } from 'lucide-react';
+import * as XLSX from 'xlsx';
 import { SARLogo } from './components/SARLogo';
 import { AnalyticsDashboard } from './components/AnalyticsDashboard';
+import { ExcelOnlineView } from './components/ExcelOnlineView';
+import { exportStyledSARExcel } from './utils/excelExporter';
 import { INITIAL_CORRESPONDENCE } from './data/mockData';
 import { db } from './firebase';
 import {
@@ -117,7 +120,7 @@ export default function App() {
   const [replyFilter, setReplyFilter] = useState('ALL');
   const [selectedMetric, setSelectedMetric] = useState<string>('TOTAL');
 
-  // Modals
+  const [viewMode, setViewMode] = useState<'standard' | 'excel_online'>('standard');
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<LetterItem | null>(null);
   const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
@@ -382,10 +385,40 @@ export default function App() {
     }
   };
 
+  const handleExportExcel = async () => {
+    try {
+      await exportStyledSARExcel(filteredItems.length > 0 ? filteredItems : items);
+    } catch (err) {
+      console.error('Error exporting styled Excel file, falling back to basic xlsx:', err);
+      try {
+        const dataToExport = filteredItems.map(i => ({
+          'رقم المرجع (Ref No)': i.refNumber,
+          'التاريخ (Date)': i.date,
+          'الشبكة (Network)': i.network,
+          'نوع الخطاب (Type)': i.direction === 'IN' ? 'وارد (In-Coming)' : 'صادر (Out-Going)',
+          'الجهة المرسلة (Sender)': i.sender || '—',
+          'الجهة المستلمة (Recipient)': i.recipient || '—',
+          'موضوع الخطاب (Subject)': i.subject,
+          'الحالة التشغيلية (Status)': i.status === 'OPEN' ? 'مفتوح (OPEN)' : i.status === 'CLOSED' ? 'مغلق (CLOSED)' : 'تحت المراجعة (UNDER REVIEW)',
+          'مطلوب رد (Requires Reply)': i.requiresReply ? 'نعم' : 'لا',
+          'مهلة الرد (Deadline)': i.replyDeadline || '—',
+          'الملاحظات (Notes)': i.notes || ''
+        }));
+        const worksheet = XLSX.utils.json_to_sheet(dataToExport);
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, worksheet, 'سجل الخطابات');
+        const fileName = `SAR_Correspondence_${new Date().toISOString().split('T')[0]}.xlsx`;
+        XLSX.writeFile(workbook, fileName);
+      } catch (e) {
+        handleExportCSV();
+      }
+    }
+  };
+
   const handleExportCSV = () => {
-    const header = 'رقم المرجع,التاريخ,الشبكة,النوع,الموضوع,الحالة,مطلوب رد,الملاحظات\n';
+    const header = 'رقم المرجع,التاريخ,الشبكة,النوع,الجهة المرسلة,الجهة المستلمة,الموضوع,الحالة,مطلوب رد,مهلة الرد,الملاحظات\n';
     const rows = filteredItems.map(i =>
-      `"${i.refNumber}","${i.date}","${i.network}","${i.direction === 'IN' ? 'وارد' : 'صادر'}","${i.subject.replace(/"/g, '""')}","${i.status}","${i.requiresReply ? 'نعم' : 'لا'}","${i.notes.replace(/"/g, '""')}"`
+      `"${i.refNumber}","${i.date}","${i.network}","${i.direction === 'IN' ? 'وارد' : 'صادر'}","${(i.sender || '').replace(/"/g, '""')}","${(i.recipient || '').replace(/"/g, '""')}","${i.subject.replace(/"/g, '""')}","${i.status}","${i.requiresReply ? 'نعم' : 'لا'}","${i.replyDeadline || ''}","${i.notes.replace(/"/g, '""')}"`
     ).join('\n');
     const blob = new Blob(['\uFEFF' + header + rows], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -475,6 +508,20 @@ export default function App() {
                 {/* Row 1 */}
                 <div className="flex items-center gap-2 flex-wrap justify-start sm:justify-end">
                   <button
+                    id="btn-toggle-view-mode"
+                    onClick={() => setViewMode(viewMode === 'standard' ? 'excel_online' : 'standard')}
+                    className={`inline-flex items-center justify-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs sm:text-sm font-bold transition-all cursor-pointer shadow-2xs whitespace-nowrap ${
+                      viewMode === 'excel_online'
+                        ? 'bg-[#107c41] text-white hover:bg-[#0b5a2f]'
+                        : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300'
+                    }`}
+                    title="التبديل بين نمط اللوحة التفاعلية ونمط جدول Excel Online المباشر"
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5" />
+                    <span>{viewMode === 'excel_online' ? '🖥️ العودة للوحة العادية' : '📊 نمط Excel Online المباشر'}</span>
+                  </button>
+
+                  <button
                     id="btn-analytics"
                     onClick={() => setIsAnalyticsOpen(true)}
                     className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 px-3.5 py-1.5 bg-[#00707b]/10 hover:bg-[#00707b]/20 text-[#00707b] border border-[#00707b]/30 rounded-full text-xs sm:text-sm font-bold transition-all cursor-pointer shadow-2xs whitespace-nowrap"
@@ -556,9 +603,19 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="max-w-[1440px] mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        
-        {/* Metric Cards: 6 Cards in Single Grid */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3.5 mb-6">
+        {viewMode === 'excel_online' ? (
+          <div className="space-y-4">
+            <ExcelOnlineView
+              items={items}
+              onSaveItem={handleSaveLetter}
+              onDeleteItem={handleDeleteLetter}
+              onViewDetails={(item) => setViewingItem(item)}
+            />
+          </div>
+        ) : (
+          <>
+            {/* Metric Cards: 6 Cards in Single Grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3.5 mb-6">
           {/* Card 1: TOTAL */}
           <button
             id="metric-total"
@@ -812,15 +869,26 @@ export default function App() {
               </div>
             </div>
 
-            {/* Export Action Button */}
-            <div className="shrink-0 flex items-center justify-end">
+            {/* Export Action Buttons */}
+            <div className="shrink-0 flex items-center gap-2 justify-end">
+              <button
+                id="btn-export-excel"
+                onClick={handleExportExcel}
+                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 py-2 bg-[#00707b] hover:bg-[#005f69] text-white rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer shadow-sm whitespace-nowrap"
+                title="تصدير جدول إكسل منسق وجاهز لـ Excel Online و OneDrive"
+              >
+                <FileSpreadsheet className="w-4 h-4 text-emerald-300" />
+                <span>تصدير Excel منسق (.xlsx)</span>
+              </button>
+
               <button
                 id="btn-export-csv"
                 onClick={handleExportCSV}
-                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 py-2 bg-[#00707b]/10 hover:bg-[#00707b]/20 text-[#00707b] border border-[#00707b]/40 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer shadow-2xs whitespace-nowrap"
+                className="hidden sm:inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-2xs whitespace-nowrap"
+                title="تصدير بصيغة CSV النصية"
               >
-                <Download className="w-4 h-4 text-[#00707b]" />
-                <span>تصدير وحفظ (Export)</span>
+                <Download className="w-3.5 h-3.5 text-slate-500" />
+                <span>CSV</span>
               </button>
             </div>
 
@@ -1115,6 +1183,8 @@ export default function App() {
             </table>
           </div>
         </div>
+        </>
+        )}
 
       </main>
 
